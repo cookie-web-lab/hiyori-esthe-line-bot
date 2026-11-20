@@ -93,6 +93,25 @@ async def insert_chat_log(
         res.raise_for_status()
 
 
+async def get_recent_questions(user_hash: str, limit: int = 20) -> list[str]:
+    """そのユーザーの最近の質問を、新しい順に取得する(chat_logs から)。"""
+    url, _headers = _base()
+    url = url.replace("/line_users", "/chat_logs")
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(
+            url,
+            headers=_headers,
+            params={
+                "line_user_hash": f"eq.{user_hash}",
+                "select": "question",
+                "order": "created_at.desc,id.desc",
+                "limit": limit,
+            },
+        )
+        res.raise_for_status()
+    return [r["question"] for r in res.json() if r.get("question")]
+
+
 async def keepalive_read() -> int:
     """Supabaseが停止しないよう、テーブルを1行だけ軽く読む。"""
     url, headers = _base()

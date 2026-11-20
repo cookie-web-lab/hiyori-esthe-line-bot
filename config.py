@@ -18,11 +18,15 @@ MSG_NON_TEXT = "文字でご質問ください"
 MSG_DIFY_ERROR = "ただいま混み合っています。少し時間をおいて送ってください"
 MSG_RESUME = "前回のご相談の続きからお答えします。ご質問をどうぞ"
 MSG_RESUME_NOT_FOUND = "前回のご相談が見つかりませんでした。新しいご相談として承ります。ご質問をどうぞ"
+MSG_RESUME_WITH_TOPIC = "前回は「{topic}」についてご相談いただいていました。続きのご質問をどうぞ。"
 MSG_RESTART = "新しいご相談として承ります。ご質問をどうぞ"
 
 # ユーザーが送る特別なコマンド
 CMD_RESUME = "前回の続き"
 CMD_RESTART = "最初から"
+
+# 「前回は「〇〇」について…」に出す質問の最大文字数(超えたら「…」で省略)
+RESUME_TOPIC_MAX_LENGTH = 30
 
 
 def get_env(name: str) -> str:

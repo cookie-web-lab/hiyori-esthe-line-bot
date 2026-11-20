@@ -8,6 +8,7 @@ app.py の役割:
 import hmac
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,7 +17,7 @@ import config
 from config import get_env
 from dify_client import DifyError, ask_dify
 from line_client import hash_user_id, reply_text, verify_signature
-from supabase_client import get_user, insert_chat_log, keepalive_read, save_user, touch_user
+from supabase_client import get_recent_questions, get_user, insert_chat_log, keepalive_read, save_user, touch_user
 
 logger = logging.getLogger("linebot")
 app = FastAPI()
@@ -38,6 +39,36 @@ async def log_chat(user_hash: str, question: str, answer: str, conversation_id: 
         logger.exception("chat_logs の保存に失敗しました(返信には影響なし)")
 
 
+_AFTER_RESUME = re.compile(r"^[\s、,。:：]*(?:で(?![すき]))?[\s、,。:：]*")
+_NON_TEXT_LOG = re.compile(r"^\[[a-z_]+\]$")  # スタンプなどのログ(例: [sticker])
+
+
+def split_resume(text: str) -> str | None:
+    """「前回の続き」で始まるなら、その後ろの文章(質問)を返す。始まらなければ None。
+    例: 「前回の続きで料金は?」→「料金は?」/「前回の続き」だけ → 空文字"""
+    if not text.startswith(config.CMD_RESUME):
+        return None
+    return _AFTER_RESUME.sub("", text[len(config.CMD_RESUME):], count=1).strip()
+
+
+def pick_last_topic(questions: list[str]) -> str | None:
+    """新しい順の質問リストから、最後の「通常の質問」を選ぶ(合言葉・スタンプは飛ばす)。"""
+    for q in questions:
+        q = q.strip()
+        if q in (config.CMD_RESUME, config.CMD_RESTART) or _NON_TEXT_LOG.match(q):
+            continue
+        rest = split_resume(q)  # 「前回の続きで料金は?」は後ろの「料金は?」を使う
+        if rest is not None:
+            q = rest
+        if q:
+            return q
+    return None
+
+
+def shorten(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
     """テキストメッセージ1件を処理して返信し、最後にログを保存する。"""
     user_hash = hash_user_id(line_user_id)
@@ -45,11 +76,18 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
     row = await get_user(user_hash)
     saved_id = row.get("conversation_id") if row else None
 
-    # --- 特別コマンド:「前回の続き」---
-    if text == config.CMD_RESUME:
+    # --- 特別コマンド:「前回の続き」(これだけ送られたとき)---
+    follow_up = split_resume(text)
+    if follow_up == "":
         if saved_id:
             await touch_user(user_hash)  # 24時間の期限を今からに延ばす
-            msg = config.MSG_RESUME
+            topic = pick_last_topic(await get_recent_questions(user_hash))
+            if topic:
+                msg = config.MSG_RESUME_WITH_TOPIC.format(
+                    topic=shorten(topic, config.RESUME_TOPIC_MAX_LENGTH)
+                )
+            else:
+                msg = config.MSG_RESUME
         else:
             msg = config.MSG_RESUME_NOT_FOUND
         await reply_text(reply_token, msg)
@@ -64,15 +102,21 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
         return
 
     # --- 通常の質問 ---
-    # 24時間以内なら続き、過ぎていれば新しい会話
-    conversation_id = saved_id if (saved_id and _is_fresh(row.get("updated_at"))) else None
+    if follow_up:
+        # 「前回の続きで料金は?」→ 前回の会話IDを(24時間を過ぎていても)使い、後ろの文章を質問にする
+        conversation_id = saved_id
+        question = follow_up
+    else:
+        # 24時間以内なら続き、過ぎていれば新しい会話
+        conversation_id = saved_id if (saved_id and _is_fresh(row.get("updated_at"))) else None
+        question = text
     try:
         try:
-            answer, new_id = await ask_dify(text, user_hash, conversation_id)
+            answer, new_id = await ask_dify(question, user_hash, conversation_id)
         except DifyError as e:
             # 保存していた会話がDify側で消えている場合は、新しい会話でやり直す
             if conversation_id and e.status_code == 404:
-                answer, new_id = await ask_dify(text, user_hash, None)
+                answer, new_id = await ask_dify(question, user_hash, None)
             else:
                 raise
     except DifyError as e:
