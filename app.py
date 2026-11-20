@@ -42,20 +42,45 @@ async def log_chat(user_hash: str, question: str, answer: str, conversation_id: 
 _AFTER_RESUME = re.compile(r"^[\s、,。:：]*(?:で(?![すき]))?[\s、,。:：]*")
 _NON_TEXT_LOG = re.compile(r"^\[[a-z_]+\]$")  # スタンプなどのログ(例: [sticker])
 
+# 合言葉のあとに付いていても「合言葉だけ」と同じ扱いにする、お願いの言葉
+# 例: お願い / お願いします / からお願い / でお願いします / にして / にしてください / から / で / 。 / !
+_PUNCT = r"[\s、,。.!！〜~]*"
+_FILLER_ONLY = re.compile(
+    _PUNCT
+    + r"(?:から|で|に)?"
+    + r"(?:して(?:ください|下さい)?|お願い(?:します|いたします|致します)?|ください|下さい)?"
+    + _PUNCT
+)
+
+
+def _rest_after(text: str, cmd: str) -> str | None:
+    """text が cmd で始まるなら、その後ろの文字列を返す。始まらなければ None。"""
+    return text[len(cmd):] if text.startswith(cmd) else None
+
+
+def is_restart(text: str) -> bool:
+    """「最初から」だけ、または「最初からお願い」のようにお願いの言葉だけが続く場合 True。"""
+    rest = _rest_after(text, config.CMD_RESTART)
+    return rest is not None and _FILLER_ONLY.fullmatch(rest) is not None
+
 
 def split_resume(text: str) -> str | None:
-    """「前回の続き」で始まるなら、その後ろの文章(質問)を返す。始まらなければ None。
-    例: 「前回の続きで料金は?」→「料金は?」/「前回の続き」だけ → 空文字"""
-    if not text.startswith(config.CMD_RESUME):
+    """「前回の続き」で始まるなら、その後ろの質問を返す。始まらなければ None。
+    合言葉だけ(「前回の続きからお願い」など、お願いの言葉だけが続く場合も含む)→ 空文字
+    例: 「前回の続きで料金は?」→「料金は?」"""
+    rest = _rest_after(text, config.CMD_RESUME)
+    if rest is None:
         return None
-    return _AFTER_RESUME.sub("", text[len(config.CMD_RESUME):], count=1).strip()
+    if _FILLER_ONLY.fullmatch(rest):
+        return ""
+    return _AFTER_RESUME.sub("", rest, count=1).strip()
 
 
 def pick_last_topic(questions: list[str]) -> str | None:
     """新しい順の質問リストから、最後の「通常の質問」を選ぶ(合言葉・スタンプは飛ばす)。"""
     for q in questions:
         q = q.strip()
-        if q in (config.CMD_RESUME, config.CMD_RESTART) or _NON_TEXT_LOG.match(q):
+        if is_restart(q) or _NON_TEXT_LOG.match(q):
             continue
         rest = split_resume(q)  # 「前回の続きで料金は?」は後ろの「料金は?」を使う
         if rest is not None:
@@ -95,7 +120,7 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
         return
 
     # --- 特別コマンド:「最初から」---
-    if text == config.CMD_RESTART:
+    if is_restart(text):
         await save_user(user_hash, None)  # 会話IDを消す → 次の質問は新しい会話
         await reply_text(reply_token, config.MSG_RESTART)
         await log_chat(user_hash, text, config.MSG_RESTART, None)
