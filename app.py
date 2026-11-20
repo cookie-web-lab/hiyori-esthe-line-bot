@@ -98,7 +98,12 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
     """テキストメッセージ1件を処理して返信し、最後にログを保存する。"""
     user_hash = hash_user_id(line_user_id)
     text = text.strip()
-    row = await get_user(user_hash)
+    try:
+        row = await get_user(user_hash)
+    except Exception:
+        # Supabaseから読めなくても返信は止めない。新しい会話として扱う
+        logger.exception("line_users の読み込みに失敗しました(新しい会話として続行)")
+        row = None
     saved_id = row.get("conversation_id") if row else None
 
     # --- 特別コマンド:「前回の続き」(これだけ送られたとき)---
