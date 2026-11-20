@@ -39,6 +39,16 @@ async def log_chat(user_hash: str, question: str, answer: str, conversation_id: 
         logger.exception("chat_logs の保存に失敗しました(返信には影響なし)")
 
 
+async def _safe_db(func, *args):
+    """Supabaseの書き込み・読み込みを実行する。失敗してもエラーをログに残すだけで例外は出さない。
+    戻り値: (成功したか, 結果)。LINEへの返信を、Supabaseの不調で止めないために使う。"""
+    try:
+        return True, await func(*args)
+    except Exception:
+        logger.exception("Supabaseの処理に失敗しました(%s)。返信は続けます", getattr(func, "__name__", func))
+        return False, None
+
+
 _AFTER_RESUME = re.compile(r"^[\s、,。:：]*(?:で(?![すき]))?[\s、,。:：]*")
 _NON_TEXT_LOG = re.compile(r"^\[[a-z_]+\]$")  # スタンプなどのログ(例: [sticker])
 
@@ -110,8 +120,9 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
     follow_up = split_resume(text)
     if follow_up == "":
         if saved_id:
-            await touch_user(user_hash)  # 24時間の期限を今からに延ばす
-            topic = pick_last_topic(await get_recent_questions(user_hash))
+            await _safe_db(touch_user, user_hash)  # 24時間の期限を今からに延ばす(失敗しても続行)
+            _, recent = await _safe_db(get_recent_questions, user_hash)
+            topic = pick_last_topic(recent or [])  # 取得に失敗したら topic=None → 固定メッセージ
             if topic:
                 msg = config.MSG_RESUME_WITH_TOPIC.format(
                     topic=shorten(topic, config.RESUME_TOPIC_MAX_LENGTH)
@@ -126,9 +137,11 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
 
     # --- 特別コマンド:「最初から」---
     if is_restart(text):
-        await save_user(user_hash, None)  # 会話IDを消す → 次の質問は新しい会話
-        await reply_text(reply_token, config.MSG_RESTART)
-        await log_chat(user_hash, text, config.MSG_RESTART, None)
+        ok, _ = await _safe_db(save_user, user_hash, None)  # 会話IDを消す → 次の質問は新しい会話
+        # 消せなかったのに「新しいご相談」と案内すると嘘になるので、再送をお願いする
+        msg = config.MSG_RESTART if ok else config.MSG_DIFY_ERROR
+        await reply_text(reply_token, msg)
+        await log_chat(user_hash, text, msg, None)
         return
 
     # --- 通常の質問 ---
@@ -155,7 +168,7 @@ async def handle_text(reply_token: str, line_user_id: str, text: str) -> None:
         await log_chat(user_hash, text, config.MSG_DIFY_ERROR, conversation_id)
         return
 
-    await save_user(user_hash, new_id or conversation_id)
+    await _safe_db(save_user, user_hash, new_id or conversation_id)  # 保存に失敗しても回答は返す
     await reply_text(reply_token, answer)
     await log_chat(user_hash, text, answer, new_id or conversation_id)
 
